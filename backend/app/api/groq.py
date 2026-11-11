@@ -64,9 +64,26 @@ def configure_groq(
             detail="Connection is not a Groq integration.",
         )
 
+    config = dict(conn.config_json or {})
+    raw_api_key = (payload.api_key or "").strip()
+    if not raw_api_key:
+        encrypted_existing = config.get("api_key_encrypted")
+        if not encrypted_existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Groq API key is required for initial configuration.",
+            )
+        try:
+            raw_api_key = decrypt_secret(encrypted_existing)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Stored Groq API key could not be decrypted. Please re-enter your API key.",
+            ) from exc
+
     # 1. Real authenticated validation against Groq API
     try:
-        available_models = validate_groq_api_key(api_key=payload.api_key)
+        available_models = validate_groq_api_key(api_key=raw_api_key)
     except GroqAuthError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -83,17 +100,29 @@ def configure_groq(
             detail=f"Groq connection test failed: {exc}",
         )
 
-    selected_model = payload.selected_model or DEFAULT_GROQ_MODEL
+    selected_model = payload.selected_model or config.get("selected_model") or DEFAULT_GROQ_MODEL
     # If selected model provided, verify it exists or fallback gracefully
-    if payload.selected_model and available_models and payload.selected_model not in available_models:
+    if selected_model and available_models and selected_model not in available_models:
         selected_model = available_models[0]
 
     # 2. Encrypt credentials at rest
-    config = dict(conn.config_json or {})
-    config["api_key_encrypted"] = encrypt_secret(payload.api_key.strip())
+    effective_max_tokens = (
+        payload.max_completion_tokens
+        if payload.max_completion_tokens is not None
+        else payload.max_tokens
+    )
+    config["api_key_encrypted"] = encrypt_secret(raw_api_key.strip())
     config["selected_model"] = selected_model
-    config["temperature"] = payload.temperature if payload.temperature is not None else 0.7
-    config["max_tokens"] = payload.max_tokens if payload.max_tokens is not None else 256
+    config["temperature"] = (
+        payload.temperature
+        if payload.temperature is not None
+        else config.get("temperature", 0.7)
+    )
+    config["max_tokens"] = (
+        effective_max_tokens
+        if effective_max_tokens is not None
+        else config.get("max_tokens", 256)
+    )
     config["authorized_at"] = now.isoformat()
 
     conn.config_json = config

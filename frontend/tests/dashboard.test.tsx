@@ -524,4 +524,279 @@ describe("Dashboard component", () => {
     expect(screen.getByRole("button", { name: /config/i })).toBeTruthy();
     expect(screen.getByText("Model: llama-3.3-70b-versatile")).toBeTruthy();
   });
+
+  it("reads and submits ad_account_id in Meta Ads account selection modal", async () => {
+    mocks.apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.includes("/connections") && !url.includes("/meta-ads/")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify([
+              {
+                id: "conn-meta-sel",
+                provider_key: "meta_ads",
+                display_name: "Meta Account Picker",
+                status: "needs_account_selection",
+                connection_type: "oauth",
+                has_secret: true,
+              },
+            ]),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/meta-ads/accounts")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              accounts: [
+                {
+                  ad_account_id: "55667788",
+                  name: "Brand Meta Account",
+                  currency: "USD",
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/meta-ads/accounts/select") && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: "conn-meta-sel",
+              status: "connected",
+              ad_account_id: "55667788",
+              ad_account_name: "Brand Meta Account",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(new Response("[]", { status: 200 }));
+    });
+
+    render(
+      <Dashboard
+        organizationId="org-uuid-123"
+        organizations={[{ id: "org-uuid-123", name: "Test Org", role: "owner" }]}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /select ad account/i }));
+    await screen.findByText(/Brand Meta Account \(act_55667788\)/i);
+
+    fireEvent.click(screen.getByRole("button", { name: /confirm account/i }));
+
+    await waitFor(() => {
+      expect(mocks.apiFetch).toHaveBeenCalledWith(
+        expect.stringContaining("/api/v1/connections/conn-meta-sel/meta-ads/accounts/select"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ ad_account_id: "55667788", name: "Brand Meta Account" }),
+        }),
+      );
+    });
+  });
+
+  it("submits direct Meta Ads access token via Use Token modal", async () => {
+    mocks.apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.includes("/connections") && !url.includes("/meta-ads/")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify([
+              {
+                id: "conn-meta-tok",
+                provider_key: "meta_ads",
+                display_name: "Meta Direct",
+                status: "needs_authorization",
+                connection_type: "oauth",
+                has_secret: false,
+              },
+            ]),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/meta-ads/config") && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: "conn-meta-tok",
+              status: "needs_account_selection",
+              has_secret: true,
+              accessible_account_count: 1,
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/meta-ads/accounts")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ accounts: [] }), { status: 200 }),
+        );
+      }
+      return Promise.resolve(new Response("[]", { status: 200 }));
+    });
+
+    render(
+      <Dashboard
+        organizationId="org-uuid-123"
+        organizations={[{ id: "org-uuid-123", name: "Test Org", role: "owner" }]}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /use token/i }));
+    const input = await screen.findByPlaceholderText("EAA...");
+    fireEvent.change(input, { target: { value: "EAA_test_direct_token" } });
+    fireEvent.click(screen.getByRole("button", { name: /validate & continue/i }));
+
+    await waitFor(() => {
+      expect(mocks.apiFetch).toHaveBeenCalledWith(
+        expect.stringContaining("/api/v1/connections/conn-meta-tok/meta-ads/config"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ access_token: "EAA_test_direct_token" }),
+        }),
+      );
+    });
+  });
+
+  it("submits Google Ads per-connection developer token via Dev Token modal", async () => {
+    mocks.apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.includes("/connections") && !url.includes("/google-ads/")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify([
+              {
+                id: "conn-ads-dev",
+                provider_key: "google_ads",
+                display_name: "Google Ads Direct",
+                status: "needs_authorization",
+                connection_type: "oauth",
+              },
+            ]),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/google-ads/config") && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: "conn-ads-dev",
+              status: "needs_authorization",
+              has_developer_token: true,
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(new Response("[]", { status: 200 }));
+    });
+
+    render(
+      <Dashboard
+        organizationId="org-uuid-123"
+        organizations={[{ id: "org-uuid-123", name: "Test Org", role: "owner" }]}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /dev token/i }));
+    const input = await screen.findByPlaceholderText(
+      /enter your google ads developer token/i,
+    );
+    fireEvent.change(input, { target: { value: "ads-dev-token-123" } });
+    fireEvent.click(screen.getByRole("button", { name: /save developer token/i }));
+
+    await waitFor(() => {
+      expect(mocks.apiFetch).toHaveBeenCalledWith(
+        expect.stringContaining("/api/v1/connections/conn-ads-dev/google-ads/config"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ developer_token: "ads-dev-token-123" }),
+        }),
+      );
+    });
+  });
+
+  it("allows saving Groq config without re-entering stored API key", async () => {
+    mocks.apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.includes("/connections") && !url.includes("/groq/")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify([
+              {
+                id: "conn-groq-edit",
+                provider_key: "groq",
+                display_name: "Groq LPU",
+                status: "connected",
+                connection_type: "api_key",
+                has_secret: true,
+                selected_model: "llama-3.3-70b-versatile",
+                temperature: 0.7,
+                max_tokens: 1024,
+              },
+            ]),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/groq/models")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              models: [
+                { id: "llama-3.3-70b-versatile", name: "llama-3.3-70b-versatile" },
+                { id: "llama-3.1-8b-instant", name: "llama-3.1-8b-instant" },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/groq/config") && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: "conn-groq-edit",
+              status: "connected",
+              has_secret: true,
+              selected_model: "llama-3.3-70b-versatile",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(new Response("[]", { status: 200 }));
+    });
+
+    render(
+      <Dashboard
+        organizationId="org-uuid-123"
+        organizations={[{ id: "org-uuid-123", name: "Test Org", role: "owner" }]}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /^config$/i }));
+    await screen.findByPlaceholderText(/leave blank to keep stored api key/i);
+
+    const saveBtn = screen.getByRole("button", { name: /validate & save/i }) as HTMLButtonElement;
+    expect(saveBtn.disabled).toBe(false);
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(mocks.apiFetch).toHaveBeenCalledWith(
+        expect.stringContaining("/api/v1/connections/conn-groq-edit/groq/config"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            selected_model: "llama-3.3-70b-versatile",
+            temperature: 0.7,
+            max_tokens: 1024,
+          }),
+        }),
+      );
+    });
+  });
 });

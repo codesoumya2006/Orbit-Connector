@@ -1031,4 +1031,24 @@ def test_oauth_callback_failure_scenarios_and_atomicity(ga_env, monkeypatch):
     assert "already been consumed" in res_thread2.json()["detail"]
 
 
+def test_google_oauth_authorize_returns_503_without_orphan_state_when_unconfigured(
+    ga_env, monkeypatch
+):
+    client = ga_env["client"]
+    org_id = str(ga_env["org_a_id"])
+    monkeypatch.setattr(settings, "google_client_id", "")
+
+    res = client.post(
+        "/api/v1/oauth/google/authorize",
+        headers={"X-Organization-ID": org_id},
+        json={"connection_id": "conn-ga-alpha"},
+    )
+    assert res.status_code == 503
+    assert "GOOGLE_CLIENT_ID" in res.json()["detail"]
+
+    with ga_env["session_factory"]() as db:
+        states = db.query(OAuthState).filter_by(connection_id="conn-ga-alpha").all()
+        assert states == []
+
+
 

@@ -719,3 +719,65 @@ def test_groq_credentials_redacted_on_connections_endpoint(groq_env):
     assert groq_conn["selected_model"] == "llama-3.3-70b-versatile"
     assert "api_key_encrypted" not in groq_conn
     assert "gsk_secret_123" not in str(resp.text)
+
+
+def test_groq_configure_updates_model_and_params_without_reentering_api_key(groq_env):
+    owner = groq_env["owner"]
+    org_a = groq_env["org_a"]
+    conn_a = groq_env["conn_a"]
+    sf = groq_env["session_factory"]
+
+    def override_db():
+        with sf() as s:
+            yield s
+
+    def auth_owner():
+        return AuthenticatedPrincipal(
+            uid=owner.firebase_uid,
+            auth_time=datetime.now(timezone.utc),
+            user=owner,
+        )
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_principal] = auth_owner
+
+    with sf() as db:
+        conn = db.query(IntegrationConnection).filter_by(id=conn_a.id).one()
+        conn.config_json = {
+            "api_key_encrypted": encrypt_secret("gsk_existing_key_abc"),
+            "selected_model": "llama-3.3-70b-versatile",
+            "temperature": 0.7,
+            "max_tokens": 1024,
+        }
+        conn.status = "connected"
+        db.commit()
+
+    def handler(request: httpx.Request):
+        assert request.headers["authorization"] == "Bearer gsk_existing_key_abc"
+        return httpx.Response(200, json={"data": [{"id": "llama-3.1-8b-instant"}]})
+
+    def mock_factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return _real_httpx_client(*args, **kwargs)
+
+    with patch("app.providers.groq.client.httpx.Client", side_effect=mock_factory):
+        client = TestClient(app)
+        resp = client.post(
+            f"/api/v1/connections/{conn_a.id}/groq/config",
+            headers={"X-Organization-Id": str(org_a.id)},
+            json={
+                "selected_model": "llama-3.1-8b-instant",
+                "temperature": 0.25,
+                "max_tokens": 2048,
+            },
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["selected_model"] == "llama-3.1-8b-instant"
+
+    with sf() as db:
+        conn = db.query(IntegrationConnection).filter_by(id=conn_a.id).one()
+        assert decrypt_secret(conn.config_json["api_key_encrypted"]) == "gsk_existing_key_abc"
+        assert conn.config_json["selected_model"] == "llama-3.1-8b-instant"
+        assert conn.config_json["temperature"] == 0.25
+        assert conn.config_json["max_tokens"] == 2048

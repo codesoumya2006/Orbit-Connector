@@ -989,3 +989,113 @@ def test_meta_ads_currency_separation_and_explicit_missing_handling(meta_ads_env
     assert "missing currency metadata" in res_no_curr.text.lower()
 
     db.close()
+
+
+def test_meta_ads_oauth_authorize_returns_503_without_orphan_state_when_unconfigured(
+    meta_ads_env, monkeypatch
+):
+    session_factory = meta_ads_env["session_factory"]
+    owner = meta_ads_env["owner"]
+    org_a = meta_ads_env["org_a"]
+    conn_a = meta_ads_env["conn_a"]
+
+    def override_db():
+        with session_factory() as s:
+            yield s
+
+    def auth_owner():
+        return AuthenticatedPrincipal(
+            uid=owner.firebase_uid,
+            auth_time=datetime.now(timezone.utc),
+            user=owner,
+        )
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_principal] = auth_owner
+    monkeypatch.setattr(settings, "meta_app_id", "")
+
+    client = TestClient(app)
+    res = client.post(
+        "/api/v1/oauth/meta-ads/authorize",
+        headers={"X-Organization-ID": str(org_a.id)},
+        json={"connection_id": conn_a.id},
+    )
+    assert res.status_code == 503
+    assert "META_APP_ID" in res.json()["detail"]
+
+    with session_factory() as db:
+        assert db.query(OAuthState).filter_by(connection_id=conn_a.id).all() == []
+
+
+def test_meta_ads_direct_token_config_endpoint(meta_ads_env, monkeypatch):
+    session_factory = meta_ads_env["session_factory"]
+    owner = meta_ads_env["owner"]
+    org_a = meta_ads_env["org_a"]
+    conn_a = meta_ads_env["conn_a"]
+
+    def override_db():
+        with session_factory() as s:
+            yield s
+
+    def auth_owner():
+        return AuthenticatedPrincipal(
+            uid=owner.firebase_uid,
+            auth_time=datetime.now(timezone.utc),
+            user=owner,
+        )
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_principal] = auth_owner
+
+    monkeypatch.setattr(
+        "app.api.meta_ads.list_accessible_ad_accounts",
+        lambda access_token: [
+            {
+                "ad_account_id": "99887766",
+                "name": "Direct Meta Brand",
+                "currency": "USD",
+                "account_status": 1,
+                "timezone_name": "America/New_York",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.api.meta_ads.validate_ad_account_access",
+        lambda access_token, account_id: {
+            "ad_account_id": clean_ad_account_id(account_id),
+            "name": "Direct Meta Brand",
+            "currency": "USD",
+            "account_status": 1,
+            "timezone_name": "America/New_York",
+        },
+    )
+
+    client = TestClient(app)
+
+    # 1. Save direct access token without preselecting account -> needs_account_selection
+    res1 = client.post(
+        f"/api/v1/connections/{conn_a.id}/meta-ads/config",
+        headers={"X-Organization-ID": str(org_a.id)},
+        json={"access_token": "EAA_direct_secret_token"},
+    )
+    assert res1.status_code == 200, res1.text
+    assert res1.json()["status"] == "needs_account_selection"
+    assert res1.json()["has_secret"] is True
+    assert "EAA_direct_secret_token" not in res1.text
+
+    # 2. Save direct access token WITH ad_account_id -> connected
+    res2 = client.post(
+        f"/api/v1/connections/{conn_a.id}/meta-ads/config",
+        headers={"X-Organization-ID": str(org_a.id)},
+        json={"access_token": "EAA_direct_secret_token", "ad_account_id": "act_99887766"},
+    )
+    assert res2.status_code == 200, res2.text
+    data2 = res2.json()
+    assert data2["status"] == "connected"
+    assert data2["ad_account_id"] == "99887766"
+    assert data2["accounts_count"] == 1
+
+    with session_factory() as db:
+        saved = db.get(IntegrationConnection, conn_a.id)
+        assert saved.config_json["currency"] == "USD"
+        assert decrypt_secret(saved.config_json["access_token_encrypted"]) == "EAA_direct_secret_token"

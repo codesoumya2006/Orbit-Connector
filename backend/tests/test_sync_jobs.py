@@ -899,3 +899,37 @@ def test_error_message_and_audit_redaction_of_bearer_tokens_and_credentials(sync
         assert "top_secret_prod_key_999" not in audit_msg
 
 
+def test_run_sync_job_on_demand_endpoint(sync_env, monkeypatch):
+    client = sync_env["client"]
+    org_id = str(sync_env["org_a_id"])
+
+    create_res = client.post(
+        "/api/v1/sync-jobs",
+        headers={"X-Organization-ID": org_id},
+        json={"connection_id": "conn-alpha-1", "job_type": "manual_sync"},
+    )
+    assert create_res.status_code == 201
+    job_id = create_res.json()["id"]
+    assert create_res.json()["status"] == "queued"
+
+    def fake_process_claimed_job(db, job, worker_id="test"):
+        return process_claimed_job(
+            db,
+            job,
+            adapter=DeterministicTestAdapter(
+                behaviors={"conn-alpha-1": {"result": {"rows_synced": 42}}}
+            ),
+            worker_id=worker_id,
+        )
+
+    monkeypatch.setattr("app.api.sync_jobs.process_claimed_job", fake_process_claimed_job)
+
+    run_res = client.post(
+        f"/api/v1/sync-jobs/{job_id}/run",
+        headers={"X-Organization-ID": org_id},
+    )
+    assert run_res.status_code == 200, run_res.text
+    data = run_res.json()
+    assert data["status"] == "succeeded"
+    assert data["result"] == {"result": {"rows_synced": 42}}
+

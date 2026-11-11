@@ -4,6 +4,20 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
+class MetaAdsConfigRequest(BaseModel):
+    access_token: str = Field(..., min_length=10, max_length=2048)
+    ad_account_id: str | None = Field(None, max_length=64)
+
+
+class MetaAdsConfigResponse(BaseModel):
+    status: str
+    connection_id: str
+    has_secret: bool = True
+    accounts_count: int = 0
+    ad_account_id: str | None = None
+    message: str
+
+
 class MetaAdsOAuthAuthorizeResponse(BaseModel):
     authorization_url: str
     state: str

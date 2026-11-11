@@ -333,3 +333,32 @@ def test_incomplete_or_wrong_project_claims_fail_closed(
 
     assert response.status_code == 401
     assert TOKEN not in response.text
+
+
+def test_real_firebase_app_verifies_via_public_certs_without_adc(
+    ready_auth, database, monkeypatch
+):
+    auth_module, auth_sdk, _ = ready_auth
+
+    class FakeRealApp:
+        pass
+
+    fake_verifier = Mock()
+    fake_verifier.verify_id_token.return_value = {
+        "uid": FIREBASE_UID,
+        "auth_time": AUTH_TIME,
+        "aud": PROJECT_ID,
+        "iss": f"https://securetoken.google.com/{PROJECT_ID}",
+    }
+
+    monkeypatch.setattr(auth_module.firebase_admin, "App", FakeRealApp, raising=False)
+    monkeypatch.setattr(auth_module, "_firebase_app", FakeRealApp())
+    monkeypatch.setattr(auth_module, "_has_admin_credentials", lambda: False)
+    monkeypatch.setattr(auth_module, "_get_public_cert_verifier", lambda app: fake_verifier)
+
+    response = _get_protected_response(auth_module, database[0])
+
+    assert response.status_code == 200
+    assert response.json()["uid"] == FIREBASE_UID
+    fake_verifier.verify_id_token.assert_called_once_with(TOKEN)
+    auth_sdk.verify_id_token.assert_not_called()

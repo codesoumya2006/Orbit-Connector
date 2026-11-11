@@ -20,6 +20,8 @@ from app.models.entities import AuditEvent, User
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 _firebase_app: firebase_admin.App | None = None
+_token_verifier: Any = None
+_token_verifier_app: Any = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,33 @@ class AuthenticatedPrincipal:
     uid: str
     auth_time: datetime
     user: User
+
+
+def _has_admin_credentials() -> bool:
+    if settings.firebase_credentials_path or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        return True
+    appdata = os.environ.get("APPDATA")
+    candidates = [
+        os.path.join(os.path.expanduser("~"), ".config", "gcloud", "application_default_credentials.json"),
+    ]
+    if appdata:
+        candidates.append(os.path.join(appdata, "gcloud", "application_default_credentials.json"))
+    return any(os.path.isfile(path) for path in candidates)
+
+
+def _is_real_firebase_app(firebase_app: Any) -> bool:
+    app_cls = getattr(firebase_admin, "App", None)
+    return isinstance(app_cls, type) and isinstance(firebase_app, app_cls)
+
+
+def _get_public_cert_verifier(firebase_app: firebase_admin.App) -> Any:
+    global _token_verifier, _token_verifier_app
+    if _token_verifier is None or _token_verifier_app is not firebase_app:
+        from firebase_admin import _token_gen
+
+        _token_verifier = _token_gen.TokenVerifier(firebase_app)
+        _token_verifier_app = firebase_app
+    return _token_verifier
 
 
 def _get_firebase_app() -> firebase_admin.App:
@@ -73,11 +102,24 @@ def verify_firebase_id_token(id_token: str) -> dict[str, Any]:
         )
 
     try:
-        _get_firebase_app()
-        try:
-            claims = auth.verify_id_token(id_token, check_revoked=True)
-        except DefaultCredentialsError:
-            claims = auth.verify_id_token(id_token, check_revoked=False)
+        firebase_app = _get_firebase_app()
+        if _has_admin_credentials():
+            try:
+                claims = auth.verify_id_token(id_token, check_revoked=True)
+            except DefaultCredentialsError:
+                if _is_real_firebase_app(firebase_app):
+                    claims = _get_public_cert_verifier(firebase_app).verify_id_token(id_token)
+                else:
+                    claims = auth.verify_id_token(id_token, check_revoked=False)
+        elif _is_real_firebase_app(firebase_app):
+            # Verify RS256 signature, expiry, issuer, and audience against Google's Firebase
+            # public x509 certificates without triggering slow ADC / GCE metadata lookups.
+            claims = _get_public_cert_verifier(firebase_app).verify_id_token(id_token)
+        else:
+            try:
+                claims = auth.verify_id_token(id_token, check_revoked=True)
+            except DefaultCredentialsError:
+                claims = auth.verify_id_token(id_token, check_revoked=False)
     except (
         auth.InvalidIdTokenError,
         auth.ExpiredIdTokenError,

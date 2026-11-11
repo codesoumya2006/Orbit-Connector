@@ -29,11 +29,14 @@ from app.providers.google_ads.oauth import (
     exchange_authorization_code,
     generate_pkce,
     refresh_access_token,
+    resolve_developer_token,
     revoke_token,
 )
 from app.providers.google_ads.reports import cost_micros_to_decimal
 from app.schemas.google_ads import (
     GoogleAdsCampaignReportRowSchema,
+    GoogleAdsConfigRequest,
+    GoogleAdsConfigResponse,
     GoogleAdsCustomer,
     GoogleAdsCustomerListResponse,
     GoogleAdsCustomerSelectRequest,
@@ -98,9 +101,20 @@ def initiate_google_ads_oauth(
             db.add(conn)
             db.flush()
 
-    # 2. Generate PKCE pair and state
+    # 2. Generate PKCE pair, state, and build authorization URL before committing OAuth state
     verifier, challenge = generate_pkce()
     state_token = secrets.token_urlsafe(32)
+
+    try:
+        auth_url = build_google_ads_authorization_url(
+            state=state_token,
+            code_challenge=challenge,
+        )
+    except GoogleAdsOAuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
 
     # 3. Store state in database with encrypted verifier and short expiration (10 min)
     encrypted_verifier = encrypt_secret(verifier)
@@ -116,12 +130,6 @@ def initiate_google_ads_oauth(
     )
     db.add(oauth_state)
     db.commit()
-
-    # 4. Build authorization URL
-    auth_url = build_google_ads_authorization_url(
-        state=state_token,
-        code_challenge=challenge,
-    )
 
     return GoogleAdsOAuthAuthorizeResponse(
         authorization_url=auth_url,
@@ -276,6 +284,74 @@ def google_ads_oauth_callback(
     return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
 
+@router.post(
+    "/connections/{connection_id}/google-ads/config",
+    response_model=GoogleAdsConfigResponse,
+)
+def configure_google_ads(
+    connection_id: str,
+    payload: GoogleAdsConfigRequest,
+    context: OrganizationContext = Depends(require_permission("connector:write")),
+    db: Session = Depends(get_db),
+):
+    """Store an encrypted Google Ads Developer Token on an organization connection."""
+    now = datetime.now(timezone.utc)
+    conn = (
+        db.query(IntegrationConnection)
+        .filter_by(id=connection_id, organization_id=context.organization_id)
+        .first()
+    )
+    if not conn:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Integration connection not found.",
+        )
+    if conn.provider_key != "google_ads":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Connection is not a Google Ads integration.",
+        )
+
+    dev_token = payload.developer_token.strip()
+    if not dev_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Developer Token cannot be empty.",
+        )
+
+    config = dict(conn.config_json or {})
+    config["developer_token_encrypted"] = encrypt_secret(dev_token)
+    config["developer_token_updated_at"] = now.isoformat()
+    conn.config_json = config
+
+    if config.get("refresh_token_encrypted"):
+        conn.status = "connected" if config.get("customer_id") else "needs_customer_selection"
+
+    db.add(
+        AuditEvent(
+            id=uuid4(),
+            organization_id=context.organization_id,
+            actor_user_id=context.user_id,
+            event_type="connector.configured",
+            target_type="integration_connection",
+            target_id=str(conn.id),
+            metadata_json={
+                "provider_key": "google_ads",
+                "action": "configure_developer_token",
+            },
+            created_at=now,
+        )
+    )
+    db.commit()
+
+    return GoogleAdsConfigResponse(
+        status=conn.status,
+        connection_id=conn.id,
+        has_developer_token=True,
+        message="Google Ads Developer Token encrypted and stored.",
+    )
+
+
 @router.get(
     "/connections/{connection_id}/google-ads/customers",
     response_model=GoogleAdsCustomerListResponse,
@@ -321,19 +397,19 @@ def list_google_ads_customers(
             detail="Failed to decrypt connection credentials.",
         ) from exc
 
+    developer_token = resolve_developer_token(config)
+    if not developer_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google Ads Developer Token is not configured. Please enter your Developer Token or set GOOGLE_ADS_DEVELOPER_TOKEN in backend environment.",
+        )
+
     try:
         access_token = refresh_access_token(refresh_token)
     except GoogleAdsOAuthError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Failed to refresh Google Ads access token: {exc}",
-        )
-
-    developer_token = settings.google_ads_developer_token
-    if not developer_token:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="GOOGLE_ADS_DEVELOPER_TOKEN is not configured in backend environment.",
         )
 
     try:
@@ -398,11 +474,11 @@ def select_google_ads_customer(
             detail="Cannot select customer: connection has not completed OAuth authorization.",
         )
 
-    developer_token = settings.google_ads_developer_token
+    developer_token = resolve_developer_token(config)
     if not developer_token:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="GOOGLE_ADS_DEVELOPER_TOKEN is not configured in backend environment.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google Ads Developer Token is not configured. Please enter your Developer Token or set GOOGLE_ADS_DEVELOPER_TOKEN in backend environment.",
         )
 
     try:

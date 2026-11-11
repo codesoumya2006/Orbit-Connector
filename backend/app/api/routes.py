@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import encrypt_secret
 from app.core.context import OrganizationContext, require_permission
@@ -27,34 +28,48 @@ def providers(db: Session = Depends(get_db)):
     return rows
 
 
+def _serialize_connection(c: IntegrationConnection) -> dict:
+    cfg = c.config_json or {}
+    return {
+        "id": c.id,
+        "provider_key": c.provider_key,
+        "display_name": c.display_name,
+        "status": c.status,
+        "connection_type": c.connection_type,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+        "has_secret": bool(
+            "refresh_token_encrypted" in cfg
+            or "access_token_encrypted" in cfg
+            or "api_key_encrypted" in cfg
+        ),
+        "has_developer_token": bool(
+            cfg.get("developer_token_encrypted") or settings.google_ads_developer_token
+        ),
+        "property_id": cfg.get("property_id"),
+        "property_name": cfg.get("property_name"),
+        "account_name": cfg.get("account_name"),
+        "customer_id": cfg.get("customer_id"),
+        "customer_name": cfg.get("customer_name"),
+        "login_customer_id": cfg.get("login_customer_id"),
+        "ad_account_id": cfg.get("ad_account_id"),
+        "ad_account_name": cfg.get("ad_account_name"),
+        "currency": cfg.get("currency"),
+        "ds_id": cfg.get("ds_id"),
+        "ds_name": cfg.get("ds_name"),
+        "ds_accounts": cfg.get("ds_accounts"),
+        "selected_model": cfg.get("selected_model"),
+        "temperature": cfg.get("temperature"),
+        "max_tokens": cfg.get("max_tokens"),
+    }
+
+
 @router.get("/connections")
 def connections(
     context: OrganizationContext = Depends(require_permission("connector:read")),
     db: Session = Depends(get_db),
 ):
     return [
-        {
-            "id": c.id,
-            "provider_key": c.provider_key,
-            "display_name": c.display_name,
-            "status": c.status,
-            "connection_type": c.connection_type,
-            "created_at": c.created_at.isoformat() if c.created_at else None,
-            "has_secret": bool("refresh_token_encrypted" in (c.config_json or {}) or "access_token_encrypted" in (c.config_json or {}) or "api_key_encrypted" in (c.config_json or {})),
-            "property_id": (c.config_json or {}).get("property_id"),
-            "property_name": (c.config_json or {}).get("property_name"),
-            "account_name": (c.config_json or {}).get("account_name"),
-            "customer_id": (c.config_json or {}).get("customer_id"),
-            "customer_name": (c.config_json or {}).get("customer_name"),
-            "login_customer_id": (c.config_json or {}).get("login_customer_id"),
-            "ad_account_id": (c.config_json or {}).get("ad_account_id"),
-            "ad_account_name": (c.config_json or {}).get("ad_account_name"),
-            "currency": (c.config_json or {}).get("currency"),
-            "ds_id": (c.config_json or {}).get("ds_id"),
-            "ds_name": (c.config_json or {}).get("ds_name"),
-            "ds_accounts": (c.config_json or {}).get("ds_accounts"),
-            "selected_model": (c.config_json or {}).get("selected_model"),
-        }
+        _serialize_connection(c)
         for c in db.query(IntegrationConnection)
         .filter_by(organization_id=context.organization_id)
         .order_by(IntegrationConnection.created_at.desc())
@@ -75,28 +90,7 @@ def get_connection(
     )
     if not c:
         raise HTTPException(status_code=404, detail="Integration connection not found.")
-    return {
-        "id": c.id,
-        "provider_key": c.provider_key,
-        "display_name": c.display_name,
-        "status": c.status,
-        "connection_type": c.connection_type,
-        "created_at": c.created_at.isoformat() if c.created_at else None,
-        "has_secret": bool("refresh_token_encrypted" in (c.config_json or {}) or "access_token_encrypted" in (c.config_json or {}) or "api_key_encrypted" in (c.config_json or {})),
-        "property_id": (c.config_json or {}).get("property_id"),
-        "property_name": (c.config_json or {}).get("property_name"),
-        "account_name": (c.config_json or {}).get("account_name"),
-        "customer_id": (c.config_json or {}).get("customer_id"),
-        "customer_name": (c.config_json or {}).get("customer_name"),
-        "login_customer_id": (c.config_json or {}).get("login_customer_id"),
-        "ad_account_id": (c.config_json or {}).get("ad_account_id"),
-        "ad_account_name": (c.config_json or {}).get("ad_account_name"),
-        "currency": (c.config_json or {}).get("currency"),
-        "ds_id": (c.config_json or {}).get("ds_id"),
-        "ds_name": (c.config_json or {}).get("ds_name"),
-        "ds_accounts": (c.config_json or {}).get("ds_accounts"),
-        "selected_model": (c.config_json or {}).get("selected_model"),
-    }
+    return _serialize_connection(c)
 
 
 @router.post("/connections", status_code=status.HTTP_201_CREATED)

@@ -4,6 +4,17 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
+class GoogleAdsConfigRequest(BaseModel):
+    developer_token: str = Field(..., min_length=1, max_length=255)
+
+
+class GoogleAdsConfigResponse(BaseModel):
+    status: str
+    connection_id: str
+    has_developer_token: bool = True
+    message: str
+
+
 class GoogleAdsOAuthAuthorizeResponse(BaseModel):
     authorization_url: str
     state: str

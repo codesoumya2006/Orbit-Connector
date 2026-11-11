@@ -20,7 +20,32 @@ services:
       FRONTEND_ORIGIN: http://localhost:3000
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
       FIREBASE_CREDENTIALS_PATH: /app/firebase-credentials.json
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/oauth/google/callback}
+      GOOGLE_ADS_DEVELOPER_TOKEN: ${GOOGLE_ADS_DEVELOPER_TOKEN:-}
+      GOOGLE_ADS_REDIRECT_URI: ${GOOGLE_ADS_REDIRECT_URI:-http://localhost:8000/api/v1/oauth/google-ads/callback}
+      META_APP_ID: ${META_APP_ID:-}
+      META_APP_SECRET: ${META_APP_SECRET:-}
+      META_REDIRECT_URI: ${META_REDIRECT_URI:-http://localhost:8000/api/v1/oauth/meta-ads/callback}
     ports: ["8000:8000"]
+    depends_on:
+      db: { condition: service_healthy }
+  worker:
+    build: ./backend
+    env_file: .env
+    command: ["python", "-m", "app.workers.local_worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://connectorhub:connectorhub@db:5432/connectorhub
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/oauth/google/callback}
+      GOOGLE_ADS_DEVELOPER_TOKEN: ${GOOGLE_ADS_DEVELOPER_TOKEN:-}
+      GOOGLE_ADS_REDIRECT_URI: ${GOOGLE_ADS_REDIRECT_URI:-http://localhost:8000/api/v1/oauth/google-ads/callback}
+      META_APP_ID: ${META_APP_ID:-}
+      META_APP_SECRET: ${META_APP_SECRET:-}
+      META_REDIRECT_URI: ${META_REDIRECT_URI:-http://localhost:8000/api/v1/oauth/meta-ads/callback}
     depends_on:
       db: { condition: service_healthy }
   web:

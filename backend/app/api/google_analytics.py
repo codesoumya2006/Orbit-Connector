@@ -93,9 +93,17 @@ def initiate_google_oauth(
             db.add(conn)
             db.flush()
 
-    # 2. Generate PKCE pair and state
+    # 2. Generate PKCE pair, state, and build authorization URL before committing OAuth state
     verifier, challenge = generate_pkce()
     state_token = secrets.token_urlsafe(32)
+
+    try:
+        auth_url = build_google_authorization_url(state=state_token, code_challenge=challenge)
+    except GoogleOAuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
 
     # 3. Store state in database with encrypted verifier and short expiration (10 min)
     encrypted_verifier = encrypt_secret(verifier)
@@ -110,15 +118,6 @@ def initiate_google_oauth(
     )
     db.add(oauth_state)
     db.commit()
-
-    # 4. Build authorization URL
-    try:
-        auth_url = build_google_authorization_url(state=state_token, code_challenge=challenge)
-    except GoogleOAuthError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
-        )
 
     return OAuthAuthorizeResponse(
         authorization_url=auth_url,

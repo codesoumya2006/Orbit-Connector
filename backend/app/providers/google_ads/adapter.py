@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.security import decrypt_secret
 from app.models.entities import GoogleAdsCampaignReport, IntegrationConnection, SyncJob
-from app.providers.google_ads.oauth import GoogleAdsOAuthError, refresh_access_token
+from app.providers.google_ads.oauth import (
+    GoogleAdsOAuthError,
+    refresh_access_token,
+    resolve_developer_token,
+)
 from app.providers.google_ads.reports import (
     cost_micros_to_decimal,
     fetch_google_ads_campaign_report,
@@ -45,10 +49,10 @@ class GoogleAdsAdapter:
                 "Connection is missing a selected Google Ads customer. Customer selection required."
             )
 
-        developer_token = settings.google_ads_developer_token
+        developer_token = resolve_developer_token(config)
         if not developer_token:
             raise PermanentSyncError(
-                "Google Ads Developer Token is not configured in backend environment."
+                "Google Ads Developer Token is not configured on this connection or in backend environment."
             )
 
         login_customer_id = config.get("login_customer_id")

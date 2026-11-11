@@ -37,6 +37,7 @@ type Connection = {
   status: string;
   connection_type: string;
   has_secret?: boolean;
+  has_developer_token?: boolean;
   property_id?: string | null;
   property_name?: string | null;
   account_name?: string | null;
@@ -50,20 +51,25 @@ type Connection = {
   ds_name?: string | null;
   ds_accounts?: string | null;
   selected_model?: string | null;
+  temperature?: number | null;
+  max_tokens?: number | null;
 };
 type SupermetricsSource = {
   ds_id: string;
   name: string;
   category?: string | null;
-  requires_accounts: boolean;
+  description?: string | null;
 };
 type SupermetricsAccount = {
   account_id: string;
   account_name: string;
+  ds_id?: string;
+  currency?: string | null;
 };
 type SupermetricsReportRow = {
   id: string;
   ds_id: string;
+  ds_account_id?: string | null;
   report_date: string;
   campaign_id?: string | null;
   campaign_name?: string | null;
@@ -73,6 +79,7 @@ type SupermetricsReportRow = {
   cost: number | string;
   conversions: number;
   conversions_value?: number | string | null;
+  currency?: string | null;
 };
 type SupermetricsReportSummary = {
   total_impressions: number;
@@ -98,7 +105,7 @@ type GroqCompletionResult = {
   finish_reason: string;
 };
 type MetaAdsAccount = {
-  account_id: string;
+  ad_account_id: string;
   name: string;
   currency?: string | null;
   account_status?: number | null;
@@ -260,6 +267,9 @@ export default function Dashboard({
   const [loadingAdsCustomers, setLoadingAdsCustomers] = useState(false);
   const [selectedAdsCustomerId, setSelectedAdsCustomerId] = useState<string>("");
   const [savingAdsCustomer, setSavingAdsCustomer] = useState(false);
+  const [adsDevTokenModalConn, setAdsDevTokenModalConn] = useState<Connection | null>(null);
+  const [adsDevTokenInput, setAdsDevTokenInput] = useState("");
+  const [savingAdsDevToken, setSavingAdsDevToken] = useState(false);
 
   const [adsReportModalConn, setAdsReportModalConn] = useState<Connection | null>(null);
   const [adsReports, setAdsReports] = useState<GoogleAdsCampaignReportRow[]>([]);
@@ -271,6 +281,9 @@ export default function Dashboard({
   const [loadingMetaAccounts, setLoadingMetaAccounts] = useState(false);
   const [selectedMetaAccountId, setSelectedMetaAccountId] = useState<string>("");
   const [savingMetaAccount, setSavingMetaAccount] = useState(false);
+  const [metaTokenModalConn, setMetaTokenModalConn] = useState<Connection | null>(null);
+  const [metaAccessTokenInput, setMetaAccessTokenInput] = useState("");
+  const [savingMetaToken, setSavingMetaToken] = useState(false);
 
   const [metaReportModalConn, setMetaReportModalConn] = useState<Connection | null>(null);
   const [metaReports, setMetaReports] = useState<MetaAdsCampaignReportRow[]>([]);
@@ -285,6 +298,8 @@ export default function Dashboard({
   const [smSourceModalConn, setSmSourceModalConn] = useState<Connection | null>(null);
   const [smSources, setSmSources] = useState<SupermetricsSource[]>([]);
   const [loadingSmSources, setLoadingSmSources] = useState(false);
+  const [smAccounts, setSmAccounts] = useState<SupermetricsAccount[]>([]);
+  const [loadingSmAccounts, setLoadingSmAccounts] = useState(false);
   const [selectedSmDsId, setSelectedSmDsId] = useState("");
   const [smAccountsInput, setSmAccountsInput] = useState("");
   const [savingSmSource, setSavingSmSource] = useState(false);
@@ -455,6 +470,97 @@ export default function Dashboard({
     }
   }
 
+  async function runSyncJob(c: Connection, jobType: string, label: string) {
+    if (!organizationId) return;
+    if (isViewer) {
+      setToast("Viewers have read-only access and cannot trigger sync.");
+      return;
+    }
+    setSyncingConnId(c.id);
+    try {
+      const r = await apiFetch(`${API}/sync-jobs`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Organization-ID": organizationId,
+        },
+        body: JSON.stringify({
+          connection_id: c.id,
+          job_type: jobType,
+          metadata: {
+            start_date: "30daysAgo",
+            end_date: "yesterday",
+          },
+        }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || `Failed to trigger ${label} sync.`);
+      }
+      const job = await r.json();
+      setToast(`${label} sync queued (${job.status || "queued"}). Executing…`);
+
+      const runRes = await apiFetch(`${API}/sync-jobs/${job.id}/run`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Organization-ID": organizationId,
+        },
+      });
+      if (runRes.ok) {
+        const executed = await runRes.json();
+        if (executed.status === "succeeded") {
+          const count = executed.result?.rows_synced ?? 0;
+          setToast(`${label} sync completed (${count} row${count === 1 ? "" : "s"} synced).`);
+        } else if (executed.status === "failed" || executed.status === "retrying") {
+          setToast(executed.error?.message || `${label} sync ${executed.status}.`);
+        } else {
+          setToast(`${label} sync status: ${executed.status}.`);
+        }
+      }
+      load();
+    } catch (e: any) {
+      setToast(e.message || `Failed to trigger ${label} sync.`);
+    } finally {
+      setSyncingConnId(null);
+    }
+  }
+
+  function openAdsDevTokenModal(c: Connection) {
+    setAdsDevTokenModalConn(c);
+    setAdsDevTokenInput("");
+  }
+
+  async function saveAdsDevToken() {
+    if (!adsDevTokenModalConn || !organizationId || !adsDevTokenInput.trim()) return;
+    setSavingAdsDevToken(true);
+    try {
+      const r = await apiFetch(`${API}/connections/${adsDevTokenModalConn.id}/google-ads/config`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Organization-ID": organizationId,
+        },
+        body: JSON.stringify({ developer_token: adsDevTokenInput.trim() }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to save Google Ads Developer Token.");
+      }
+      const updatedConn = { ...adsDevTokenModalConn, has_developer_token: true };
+      setToast("Google Ads Developer Token stored securely!");
+      setAdsDevTokenModalConn(null);
+      load();
+      if (updatedConn.status === "needs_customer_selection" || updatedConn.status === "connected") {
+        openAdsCustomerModal(updatedConn);
+      }
+    } catch (e: any) {
+      setToast(e.message || "Failed to save Google Ads Developer Token.");
+    } finally {
+      setSavingAdsDevToken(false);
+    }
+  }
+
   async function openAdsCustomerModal(c: Connection) {
     if (!organizationId) return;
     setAdsCustomerModalConn(c);
@@ -467,7 +573,14 @@ export default function Dashboard({
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        throw new Error(err.detail || "Could not retrieve Google Ads customers.");
+        const msg = err.detail || "Could not retrieve Google Ads customers.";
+        if (msg.toLowerCase().includes("developer token")) {
+          setAdsCustomerModalConn(null);
+          openAdsDevTokenModal(c);
+          setToast("Please provide your Google Ads Developer Token to list accounts.");
+          return;
+        }
+        throw new Error(msg);
       }
       const data = await r.json();
       const custs: GoogleAdsCustomer[] = data.customers || [];
@@ -496,6 +609,7 @@ export default function Dashboard({
         body: JSON.stringify({
           customer_id: selectedAdsCustomerId,
           customer_name: chosen?.descriptive_name || `Account ${selectedAdsCustomerId}`,
+          login_customer_id: chosen?.login_customer_id || undefined,
         }),
       });
       if (!r.ok) {
@@ -513,40 +627,7 @@ export default function Dashboard({
   }
 
   async function triggerGoogleAdsSync(c: Connection) {
-    if (!organizationId) return;
-    if (isViewer) {
-      setToast("Viewers have read-only access and cannot trigger sync.");
-      return;
-    }
-    setSyncingConnId(c.id);
-    try {
-      const r = await apiFetch(`${API}/sync-jobs`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Organization-ID": organizationId,
-        },
-        body: JSON.stringify({
-          connection_id: c.id,
-          job_type: "google_ads_sync",
-          metadata: {
-            start_date: "30daysAgo",
-            end_date: "yesterday",
-          },
-        }),
-      });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        throw new Error(err.detail || "Failed to trigger Google Ads sync.");
-      }
-      const job = await r.json();
-      setToast(`Google Ads sync queued (${job.status || "queued"}).`);
-      load();
-    } catch (e: any) {
-      setToast(e.message || "Failed to trigger Google Ads sync.");
-    } finally {
-      setSyncingConnId(null);
-    }
+    await runSyncJob(c, "google_ads_sync", "Google Ads");
   }
 
   async function openAdsReportsModal(c: Connection) {
@@ -598,6 +679,43 @@ export default function Dashboard({
     }
   }
 
+  function openMetaTokenModal(c: Connection) {
+    setMetaTokenModalConn(c);
+    setMetaAccessTokenInput("");
+  }
+
+  async function saveMetaAccessToken() {
+    if (!metaTokenModalConn || !organizationId || !metaAccessTokenInput.trim()) return;
+    setSavingMetaToken(true);
+    try {
+      const r = await apiFetch(`${API}/connections/${metaTokenModalConn.id}/meta-ads/config`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Organization-ID": organizationId,
+        },
+        body: JSON.stringify({ access_token: metaAccessTokenInput.trim() }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to validate Meta Ads access token.");
+      }
+      const updatedConn = {
+        ...metaTokenModalConn,
+        has_secret: true,
+        status: "needs_account_selection",
+      };
+      setToast("Meta Ads access token validated and stored securely!");
+      setMetaTokenModalConn(null);
+      load();
+      openMetaAccountModal(updatedConn);
+    } catch (e: any) {
+      setToast(e.message || "Failed to save Meta Ads access token.");
+    } finally {
+      setSavingMetaToken(false);
+    }
+  }
+
   async function startMetaAdsOAuth(connId?: string) {
     if (!organizationId) {
       setToast("Please select a workspace before connecting.");
@@ -618,7 +736,44 @@ export default function Dashboard({
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        throw new Error(err.detail || "Failed to initiate Meta Ads OAuth.");
+        const detail = err.detail || "Failed to initiate Meta Ads OAuth.";
+        if (detail.includes("META_APP_ID")) {
+          if (connId) {
+            const existing = connections.find((c) => c.id === connId);
+            if (existing) {
+              openMetaTokenModal(existing);
+              setToast("Meta App OAuth is not configured; enter a Meta Access Token instead.");
+              return;
+            }
+          } else {
+            const existing = connections.find((c) => c.provider_key === "meta_ads");
+            if (existing) {
+              openMetaTokenModal(existing);
+              setToast("Meta App OAuth is not configured; enter a Meta Access Token instead.");
+              return;
+            }
+            const createdRes = await apiFetch(`${API}/connections`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Organization-ID": organizationId,
+              },
+              body: JSON.stringify({
+                organization_id: organizationId,
+                provider_key: "meta_ads",
+                display_name: "Meta Ads",
+              }),
+            });
+            if (createdRes.ok) {
+              const newConn = await createdRes.json();
+              load();
+              openMetaTokenModal(newConn);
+              setToast("Meta App OAuth is not configured; enter a Meta Access Token instead.");
+              return;
+            }
+          }
+        }
+        throw new Error(detail);
       }
       const d = await r.json();
       if (d.authorization_url) {
@@ -647,7 +802,7 @@ export default function Dashboard({
       const accts: MetaAdsAccount[] = data.accounts || [];
       setMetaAccounts(accts);
       if (accts.length > 0 && !c.ad_account_id) {
-        setSelectedMetaAccountId(accts[0].account_id);
+        setSelectedMetaAccountId(accts[0].ad_account_id);
       }
     } catch (e: any) {
       setToast(e.message || "Failed to load Meta ad accounts.");
@@ -659,7 +814,7 @@ export default function Dashboard({
   async function saveSelectedMetaAccount() {
     if (!metaAccountModalConn || !organizationId || !selectedMetaAccountId) return;
     setSavingMetaAccount(true);
-    const chosen = metaAccounts.find((a) => a.account_id === selectedMetaAccountId);
+    const chosen = metaAccounts.find((a) => a.ad_account_id === selectedMetaAccountId);
     try {
       const r = await apiFetch(`${API}/connections/${metaAccountModalConn.id}/meta-ads/accounts/select`, {
         method: "POST",
@@ -668,9 +823,8 @@ export default function Dashboard({
           "X-Organization-ID": organizationId,
         },
         body: JSON.stringify({
-          account_id: selectedMetaAccountId,
+          ad_account_id: selectedMetaAccountId,
           name: chosen?.name || `Account ${selectedMetaAccountId}`,
-          currency: chosen?.currency || undefined,
         }),
       });
       if (!r.ok) {
@@ -688,40 +842,7 @@ export default function Dashboard({
   }
 
   async function triggerMetaAdsSync(c: Connection) {
-    if (!organizationId) return;
-    if (isViewer) {
-      setToast("Viewers have read-only access and cannot trigger sync.");
-      return;
-    }
-    setSyncingConnId(c.id);
-    try {
-      const r = await apiFetch(`${API}/sync-jobs`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Organization-ID": organizationId,
-        },
-        body: JSON.stringify({
-          connection_id: c.id,
-          job_type: "meta_ads_sync",
-          metadata: {
-            start_date: "30daysAgo",
-            end_date: "yesterday",
-          },
-        }),
-      });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        throw new Error(err.detail || "Failed to trigger Meta Ads sync.");
-      }
-      const job = await r.json();
-      setToast(`Meta Ads sync queued (${job.status || "queued"}).`);
-      load();
-    } catch (e: any) {
-      setToast(e.message || "Failed to trigger Meta Ads sync.");
-    } finally {
-      setSyncingConnId(null);
-    }
+    await runSyncJob(c, "meta_ads_sync", "Meta Ads");
   }
 
   async function openMetaReportsModal(c: Connection) {
@@ -832,40 +953,7 @@ export default function Dashboard({
   }
 
   async function triggerSync(c: Connection) {
-    if (!organizationId) return;
-    if (isViewer) {
-      setToast("Viewers have read-only access and cannot trigger sync jobs.");
-      return;
-    }
-    setSyncingConnId(c.id);
-    try {
-      const r = await apiFetch(`${API}/sync-jobs`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Organization-ID": organizationId,
-        },
-        body: JSON.stringify({
-          connection_id: c.id,
-          job_type: "ga4_sync",
-          metadata: {
-            start_date: "30daysAgo",
-            end_date: "yesterday",
-          },
-        }),
-      });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        throw new Error(err.detail || "Could not create sync job.");
-      }
-      const data = await r.json();
-      setToast(`Sync job created (${data.status}).`);
-      load();
-    } catch (e: any) {
-      setToast(e.message || "Failed to trigger sync.");
-    } finally {
-      setSyncingConnId(null);
-    }
+    await runSyncJob(c, "ga4_sync", "Google Analytics 4");
   }
 
   async function openReportsModal(c: Connection) {
@@ -949,12 +1037,34 @@ export default function Dashboard({
     }
   }
 
+  async function loadSmAccountsForSource(connId: string, dsId: string) {
+    if (!organizationId || !dsId) return;
+    setLoadingSmAccounts(true);
+    setSmAccounts([]);
+    try {
+      const r = await apiFetch(
+        `${API}/connections/${connId}/supermetrics/accounts?ds_id=${encodeURIComponent(dsId)}`,
+        { headers: { "X-Organization-ID": organizationId } },
+      );
+      if (r.ok) {
+        const d = await r.json();
+        setSmAccounts(d.accounts || []);
+      }
+    } catch {
+      // Optional discovery fallback to manual account entry
+    } finally {
+      setLoadingSmAccounts(false);
+    }
+  }
+
   async function openSmSourceModal(c: Connection) {
     if (!organizationId) return;
     setSmSourceModalConn(c);
     setLoadingSmSources(true);
     setSmSources([]);
-    setSelectedSmDsId(c.ds_id || "GAWA");
+    setSmAccounts([]);
+    const initialDs = c.ds_id || "AW";
+    setSelectedSmDsId(initialDs);
     setSmAccountsInput(c.ds_accounts || "");
     try {
       const r = await apiFetch(`${API}/connections/${c.id}/supermetrics/sources`, {
@@ -967,8 +1077,10 @@ export default function Dashboard({
       const data = await r.json();
       const sources: SupermetricsSource[] = data.sources || [];
       setSmSources(sources);
-      if (sources.length > 0 && !c.ds_id) {
-        setSelectedSmDsId(sources[0].ds_id);
+      const effectiveDs = !c.ds_id && sources.length > 0 ? sources[0].ds_id : initialDs;
+      setSelectedSmDsId(effectiveDs);
+      if (effectiveDs) {
+        void loadSmAccountsForSource(c.id, effectiveDs);
       }
     } catch (e: any) {
       setToast(e.message || "Failed to load Supermetrics data sources.");
@@ -1009,40 +1121,7 @@ export default function Dashboard({
   }
 
   async function triggerSupermetricsSync(c: Connection) {
-    if (!organizationId) return;
-    if (isViewer) {
-      setToast("Viewers have read-only access and cannot trigger sync.");
-      return;
-    }
-    setSyncingConnId(c.id);
-    try {
-      const r = await apiFetch(`${API}/sync-jobs`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Organization-ID": organizationId,
-        },
-        body: JSON.stringify({
-          connection_id: c.id,
-          job_type: "supermetrics_sync",
-          metadata: {
-            start_date: "30daysAgo",
-            end_date: "yesterday",
-          },
-        }),
-      });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        throw new Error(err.detail || "Failed to trigger Supermetrics sync.");
-      }
-      const job = await r.json();
-      setToast(`Supermetrics sync queued (${job.status || "queued"}).`);
-      load();
-    } catch (e: any) {
-      setToast(e.message || "Failed to trigger Supermetrics sync.");
-    } finally {
-      setSyncingConnId(null);
-    }
+    await runSyncJob(c, "supermetrics_sync", "Supermetrics");
   }
 
   async function openSmReportsModal(c: Connection) {
@@ -1099,6 +1178,9 @@ export default function Dashboard({
     setGroqConfigModalConn(c);
     setGroqApiKey("");
     setGroqSelectedModel(c.selected_model || "llama-3.3-70b-versatile");
+    setGroqTemperature(c.temperature ?? 0.7);
+    setGroqMaxTokens(c.max_tokens ?? 256);
+    setGroqModels([]);
     if (c.has_secret && organizationId) {
       setLoadingGroqModels(true);
       try {
@@ -1118,27 +1200,31 @@ export default function Dashboard({
   }
 
   async function saveGroqConfig() {
-    if (!groqConfigModalConn || !organizationId || !groqApiKey.trim()) return;
+    if (!groqConfigModalConn || !organizationId) return;
+    if (!groqApiKey.trim() && !groqConfigModalConn.has_secret) return;
     setSavingGroqConfig(true);
     try {
+      const payload: Record<string, any> = {
+        selected_model: groqSelectedModel,
+        temperature: groqTemperature,
+        max_tokens: groqMaxTokens,
+      };
+      if (groqApiKey.trim()) {
+        payload.api_key = groqApiKey.trim();
+      }
       const r = await apiFetch(`${API}/connections/${groqConfigModalConn.id}/groq/config`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "X-Organization-ID": organizationId,
         },
-        body: JSON.stringify({
-          api_key: groqApiKey.trim(),
-          selected_model: groqSelectedModel,
-          temperature: groqTemperature,
-          max_tokens: groqMaxTokens,
-        }),
+        body: JSON.stringify(payload),
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         throw new Error(err.detail || "Failed to configure Groq.");
       }
-      setToast("Groq API key validated and configured successfully!");
+      setToast("Groq configuration validated and saved!");
       setGroqConfigModalConn(null);
       load();
     } catch (e: any) {
@@ -1794,12 +1880,12 @@ export default function Dashboard({
                           {c.provider_key === "google_ads"
                             ? (c.customer_name ? `${c.customer_name} (${c.customer_id})` : (c.customer_id || "Google Ads"))
                             : c.provider_key === "meta_ads"
-                            ? (c.ad_account_name ? `${c.ad_account_name} (act_${c.ad_account_id})` : (c.ad_account_id ? `act_${c.ad_account_id}` : "Meta Ads"))
-                            : c.provider_key === "supermetrics"
-                            ? (c.ds_name ? `${c.ds_name} (${c.ds_id})${c.ds_accounts ? ` · ${c.ds_accounts}` : ""}` : (c.ds_id || "Supermetrics Enterprise v2"))
-                            : c.provider_key === "groq"
-                            ? (c.selected_model ? `Model: ${c.selected_model}` : "Groq LPU Inference")
-                            : `${c.account_name ? `${c.account_name} · ` : ""}${c.property_name || c.property_id || c.provider_key.replaceAll("_", " ")}`}
+                              ? (c.ad_account_name ? `${c.ad_account_name} (act_${c.ad_account_id})` : (c.ad_account_id ? `act_${c.ad_account_id}` : "Meta Ads"))
+                              : c.provider_key === "supermetrics"
+                                ? (c.ds_name ? `${c.ds_name} (${c.ds_id})${c.ds_accounts ? ` · ${c.ds_accounts}` : ""}` : (c.ds_id || "Supermetrics Enterprise v2"))
+                                : c.provider_key === "groq"
+                                  ? (c.selected_model ? `Model: ${c.selected_model}` : "Groq LPU Inference")
+                                  : `${c.account_name ? `${c.account_name} · ` : ""}${c.property_name || c.property_id || c.provider_key.replaceAll("_", " ")}`}
                         </small>
                       </div>
                       {c.status === "connected" ? (
@@ -1840,8 +1926,8 @@ export default function Dashboard({
                                     previewMode
                                       ? unavailableActionTitle
                                       : isViewer
-                                      ? "Viewer role cannot trigger sync"
-                                      : "Trigger synchronization"
+                                        ? "Viewer role cannot trigger sync"
+                                        : "Trigger synchronization"
                                   }
                                 >
                                   <RefreshCw size={12} className={syncingConnId === c.id ? "spin" : ""} /> Sync
@@ -1858,10 +1944,10 @@ export default function Dashboard({
                                     c.provider_key === "google_ads"
                                       ? "View Google Ads campaign reports"
                                       : c.provider_key === "meta_ads"
-                                      ? "View Meta Ads campaign insights"
-                                      : c.provider_key === "supermetrics"
-                                      ? "View Supermetrics marketing reports"
-                                      : "View GA4 reports"
+                                        ? "View Meta Ads campaign insights"
+                                        : c.provider_key === "supermetrics"
+                                          ? "View Supermetrics marketing reports"
+                                          : "View GA4 reports"
                                   }
                                 >
                                   Reports
@@ -1891,12 +1977,12 @@ export default function Dashboard({
                             <i /> {c.provider_key === "google_ads"
                               ? "Customer required"
                               : c.provider_key === "meta_ads"
-                              ? "Ad account required"
-                              : c.provider_key === "supermetrics"
-                              ? (c.has_secret ? "Source required" : "API key required")
-                              : c.provider_key === "groq"
-                              ? "API key required"
-                              : "Property required"}
+                                ? "Ad account required"
+                                : c.provider_key === "supermetrics"
+                                  ? (c.has_secret ? "Source required" : "API key required")
+                                  : c.provider_key === "groq"
+                                    ? "API key required"
+                                    : "Property required"}
                           </span>
                           <div className="action-group">
                             <button
@@ -1915,13 +2001,22 @@ export default function Dashboard({
                               {c.provider_key === "google_ads"
                                 ? "Select customer"
                                 : c.provider_key === "meta_ads"
-                                ? "Select ad account"
-                                : c.provider_key === "supermetrics"
-                                ? (c.has_secret ? "Select data source" : "Configure API key")
-                                : c.provider_key === "groq"
-                                ? "Configure API key"
-                                : "Select property"}
+                                  ? "Select ad account"
+                                  : c.provider_key === "supermetrics"
+                                    ? (c.has_secret ? "Select data source" : "Configure API key")
+                                    : c.provider_key === "groq"
+                                      ? "Configure API key"
+                                      : "Select property"}
                             </button>
+                            {c.provider_key === "google_ads" && !isViewer && (
+                              <button
+                                className="secondary smallbtn"
+                                onClick={() => openAdsDevTokenModal(c)}
+                                title="Configure Google Ads Developer Token"
+                              >
+                                Dev Token
+                              </button>
+                            )}
                             {!isViewer && (
                               <button
                                 className="deletebtn"
@@ -1952,6 +2047,24 @@ export default function Dashboard({
                             >
                               {c.provider_key === "supermetrics" || c.provider_key === "groq" ? "Configure Key" : "Authorize"}
                             </button>
+                            {c.provider_key === "meta_ads" && !isViewer && (
+                              <button
+                                className="secondary smallbtn"
+                                onClick={() => openMetaTokenModal(c)}
+                                title="Connect using a Meta Marketing API Access Token"
+                              >
+                                Use Token
+                              </button>
+                            )}
+                            {c.provider_key === "google_ads" && !isViewer && (
+                              <button
+                                className="secondary smallbtn"
+                                onClick={() => openAdsDevTokenModal(c)}
+                                title="Configure Google Ads Developer Token"
+                              >
+                                Dev Token
+                              </button>
+                            )}
                             {!isViewer && (
                               <button
                                 className="deletebtn"
@@ -2393,9 +2506,19 @@ export default function Dashboard({
             )}
             <div className="modalfoot">
               <span>
-                <ShieldCheck size={14} /> Synced via Google Ads REST API v18.
+                <ShieldCheck size={14} /> Synced via Google Ads REST API v26.
               </span>
               <div>
+                <button
+                  className="secondary"
+                  onClick={() => {
+                    const c = adsCustomerModalConn;
+                    setAdsCustomerModalConn(null);
+                    openAdsDevTokenModal(c);
+                  }}
+                >
+                  Dev Token
+                </button>
                 <button
                   className="secondary"
                   onClick={() => setAdsCustomerModalConn(null)}
@@ -2408,6 +2531,55 @@ export default function Dashboard({
                   onClick={saveSelectedAdsCustomer}
                 >
                   {savingAdsCustomer ? "Saving…" : "Confirm customer"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {adsDevTokenModalConn && (
+        <div
+          className="overlay"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setAdsDevTokenModalConn(null);
+          }}
+        >
+          <div className="modal" style={{ maxWidth: 500 }}>
+            <div className="modalhead">
+              <div>
+                <div className="eyebrow">
+                  <span className="eyebrowline" /> GOOGLE ADS DEVELOPER TOKEN
+                </div>
+                <h2>Configure Developer Token</h2>
+                <p>Stored encrypted per connection for Google Ads API v26 requests.</p>
+              </div>
+              <button className="iconbtn" onClick={() => setAdsDevTokenModalConn(null)}>
+                <X size={19} />
+              </button>
+            </div>
+            <label>
+              Google Ads Developer Token
+              <input
+                type="password"
+                placeholder="Enter your Google Ads developer token"
+                value={adsDevTokenInput}
+                onChange={(e) => setAdsDevTokenInput(e.target.value)}
+              />
+            </label>
+            <div className="modalfoot">
+              <span>
+                <ShieldCheck size={14} /> Encrypted with Fernet at rest.
+              </span>
+              <div>
+                <button className="secondary" onClick={() => setAdsDevTokenModalConn(null)}>
+                  Cancel
+                </button>
+                <button
+                  className="primary"
+                  disabled={savingAdsDevToken || !adsDevTokenInput.trim()}
+                  onClick={saveAdsDevToken}
+                >
+                  {savingAdsDevToken ? "Saving…" : "Save Developer Token"}
                 </button>
               </div>
             </div>
@@ -2567,8 +2739,8 @@ export default function Dashboard({
                     style={{ marginTop: 6 }}
                   >
                     {metaAccounts.map((acct) => (
-                      <option key={acct.account_id} value={acct.account_id}>
-                        {acct.name} (act_{acct.account_id}) {acct.currency ? `[${acct.currency}]` : ""}
+                      <option key={acct.ad_account_id} value={acct.ad_account_id}>
+                        {acct.name} (act_{acct.ad_account_id}) {acct.currency ? `[${acct.currency}]` : ""}
                       </option>
                     ))}
                   </select>
@@ -2592,6 +2764,55 @@ export default function Dashboard({
                   onClick={saveSelectedMetaAccount}
                 >
                   {savingMetaAccount ? "Saving…" : "Confirm account"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {metaTokenModalConn && (
+        <div
+          className="overlay"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setMetaTokenModalConn(null);
+          }}
+        >
+          <div className="modal" style={{ maxWidth: 520 }}>
+            <div className="modalhead">
+              <div>
+                <div className="eyebrow">
+                  <span className="eyebrowline" /> META ADS DIRECT TOKEN
+                </div>
+                <h2>Connect Meta Ads Access Token</h2>
+                <p>Enter a Meta Marketing API / System User access token with ads_read permission.</p>
+              </div>
+              <button className="iconbtn" onClick={() => setMetaTokenModalConn(null)}>
+                <X size={19} />
+              </button>
+            </div>
+            <label>
+              Meta Marketing API Access Token
+              <input
+                type="password"
+                placeholder="EAA..."
+                value={metaAccessTokenInput}
+                onChange={(e) => setMetaAccessTokenInput(e.target.value)}
+              />
+            </label>
+            <div className="modalfoot">
+              <span>
+                <ShieldCheck size={14} /> Validated live via Meta Graph API v27.0.
+              </span>
+              <div>
+                <button className="secondary" onClick={() => setMetaTokenModalConn(null)}>
+                  Cancel
+                </button>
+                <button
+                  className="primary"
+                  disabled={savingMetaToken || !metaAccessTokenInput.trim()}
+                  onClick={saveMetaAccessToken}
+                >
+                  {savingMetaToken ? "Validating…" : "Validate & Continue"}
                 </button>
               </div>
             </div>
@@ -2743,7 +2964,7 @@ export default function Dashboard({
       )}
       {smConfigModalConn && (
         <div
-          className="modal-backdrop"
+          className="overlay"
           onClick={(e) => {
             if (e.target === e.currentTarget) setSmConfigModalConn(null);
           }}
@@ -2797,7 +3018,7 @@ export default function Dashboard({
       )}
       {smSourceModalConn && (
         <div
-          className="modal-backdrop"
+          className="overlay"
           onClick={(e) => {
             if (e.target === e.currentTarget) setSmSourceModalConn(null);
           }}
@@ -2822,7 +3043,13 @@ export default function Dashboard({
                   <label style={{ fontSize: 12, fontWeight: 600 }}>Data Source</label>
                   <select
                     value={selectedSmDsId}
-                    onChange={(e) => setSelectedSmDsId(e.target.value)}
+                    onChange={(e) => {
+                      const nextDs = e.target.value;
+                      setSelectedSmDsId(nextDs);
+                      if (smSourceModalConn) {
+                        void loadSmAccountsForSource(smSourceModalConn.id, nextDs);
+                      }
+                    }}
                     style={{
                       padding: "9px 12px",
                       borderRadius: 6,
@@ -2839,6 +3066,41 @@ export default function Dashboard({
                     ))}
                   </select>
                 </div>
+                {loadingSmAccounts ? (
+                  <div style={{ fontSize: 11, color: "var(--muted)" }}>
+                    Discovering authorized accounts for {selectedSmDsId}…
+                  </div>
+                ) : smAccounts.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <label style={{ fontSize: 12, fontWeight: 600 }}>
+                      Discovered Accounts ({smAccounts.length})
+                    </label>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, maxHeight: 110, overflowY: "auto" }}>
+                      {smAccounts.map((acct) => {
+                        const selectedList = smAccountsInput
+                          .split(",")
+                          .map((s) => s.trim())
+                          .filter(Boolean);
+                        const active = selectedList.includes(acct.account_id);
+                        return (
+                          <button
+                            key={acct.account_id}
+                            type="button"
+                            className={active ? "primary smallbtn" : "secondary smallbtn"}
+                            onClick={() => {
+                              const next = active
+                                ? selectedList.filter((id) => id !== acct.account_id)
+                                : [...selectedList, acct.account_id];
+                              setSmAccountsInput(next.join(", "));
+                            }}
+                          >
+                            {acct.account_name} ({acct.account_id})
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <label style={{ fontSize: 12, fontWeight: 600 }}>
                     Target Account IDs <span style={{ fontWeight: 400, color: "var(--muted)" }}>(Optional, comma-separated)</span>
@@ -2880,7 +3142,7 @@ export default function Dashboard({
       )}
       {smReportModalConn && (
         <div
-          className="modal-backdrop"
+          className="overlay"
           onClick={(e) => {
             if (e.target === e.currentTarget) setSmReportModalConn(null);
           }}
@@ -2947,7 +3209,7 @@ export default function Dashboard({
                         <th>Date</th>
                         <th>Source</th>
                         <th>Campaign</th>
-                        <th>Channel</th>
+                        <th>Account</th>
                         <th style={{ textAlign: "right" }}>Impr.</th>
                         <th style={{ textAlign: "right" }}>Clicks</th>
                         <th style={{ textAlign: "right" }}>Cost</th>
@@ -2972,7 +3234,7 @@ export default function Dashboard({
                             </span>
                           </td>
                           <td><b>{r.campaign_name || "—"}</b></td>
-                          <td>{r.channel_group || "—"}</td>
+                          <td>{r.ds_account_id || r.channel_group || "—"}</td>
                           <td style={{ textAlign: "right" }}>{r.impressions.toLocaleString()}</td>
                           <td style={{ textAlign: "right" }}>{r.clicks.toLocaleString()}</td>
                           <td style={{ textAlign: "right" }}>${Number(r.cost).toFixed(2)}</td>
@@ -2998,7 +3260,7 @@ export default function Dashboard({
       )}
       {groqConfigModalConn && (
         <div
-          className="modal-backdrop"
+          className="overlay"
           onClick={(e) => {
             if (e.target === e.currentTarget) setGroqConfigModalConn(null);
           }}
@@ -3018,7 +3280,7 @@ export default function Dashboard({
                 <label style={{ fontSize: 12, fontWeight: 600 }}>Groq API Key</label>
                 <input
                   type="password"
-                  placeholder="gsk_..."
+                  placeholder={groqConfigModalConn.has_secret ? "Leave blank to keep stored API key..." : "gsk_..."}
                   value={groqApiKey}
                   onChange={(e) => setGroqApiKey(e.target.value)}
                   style={{
@@ -3047,11 +3309,8 @@ export default function Dashboard({
                 >
                   <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile (Recommended)</option>
                   <option value="llama-3.1-8b-instant">llama-3.1-8b-instant (Fastest)</option>
-                  <option value="llama-3.1-70b-versatile">llama-3.1-70b-versatile</option>
-                  <option value="mixtral-8x7b-32768">mixtral-8x7b-32768</option>
-                  <option value="gemma2-9b-it">gemma2-9b-it</option>
                   {groqModels
-                    .filter((m) => !["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama-3.1-70b-versatile", "mixtral-8x7b-32768", "gemma2-9b-it"].includes(m.id))
+                    .filter((m) => !["llama-3.3-70b-versatile", "llama-3.1-8b-instant"].includes(m.id))
                     .map((m) => (
                       <option key={m.id} value={m.id}>
                         {m.name || m.id}
@@ -3097,7 +3356,7 @@ export default function Dashboard({
               </button>
               <button
                 className="primary"
-                disabled={savingGroqConfig || !groqApiKey.trim()}
+                disabled={savingGroqConfig || (!groqApiKey.trim() && !groqConfigModalConn.has_secret)}
                 onClick={saveGroqConfig}
               >
                 {savingGroqConfig ? "Validating…" : "Validate & Save"}
@@ -3108,7 +3367,7 @@ export default function Dashboard({
       )}
       {groqTestModalConn && (
         <div
-          className="modal-backdrop"
+          className="overlay"
           onClick={(e) => {
             if (e.target === e.currentTarget) setGroqTestModalConn(null);
           }}

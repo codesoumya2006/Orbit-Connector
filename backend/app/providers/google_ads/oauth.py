@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 import httpx
 
 from app.core.config import settings
+from app.core.security import decrypt_secret
 from app.providers.google_ads.constants import GOOGLE_ADS_SCOPE
 
 GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -16,6 +17,18 @@ GOOGLE_REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 
 class GoogleAdsOAuthError(Exception):
     """Base error for Google Ads OAuth failures."""
+
+
+def resolve_developer_token(config: dict[str, Any] | None) -> str:
+    """Resolve Google Ads developer token from encrypted connection config or backend env."""
+    if config and config.get("developer_token_encrypted"):
+        try:
+            token = decrypt_secret(config["developer_token_encrypted"])
+            if token and token.strip():
+                return token.strip()
+        except Exception:
+            pass
+    return (settings.google_ads_developer_token or "").strip()
 
 
 def generate_pkce() -> tuple[str, str]:

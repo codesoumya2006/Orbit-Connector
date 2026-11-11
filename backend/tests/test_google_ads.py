@@ -1688,3 +1688,135 @@ def test_manager_hierarchy_correct_login_customer_id_selection():
     assert verified["time_zone"] == "Europe/London"
     assert verified["is_manager"] is False
     assert verified["login_customer_id"] == "1000000000"
+
+
+def test_google_ads_oauth_authorize_returns_503_without_orphan_state_when_unconfigured(
+    google_ads_env, monkeypatch
+):
+    session_factory = google_ads_env["session_factory"]
+    owner = google_ads_env["owner"]
+    org_a = google_ads_env["org_a"]
+    conn_a = google_ads_env["conn_a"]
+
+    def override_db():
+        with session_factory() as s:
+            yield s
+
+    def auth_owner():
+        return AuthenticatedPrincipal(
+            uid=owner.firebase_uid,
+            auth_time=datetime.now(timezone.utc),
+            user=owner,
+        )
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_principal] = auth_owner
+    monkeypatch.setattr(settings, "google_client_id", "")
+
+    try:
+        client = TestClient(app)
+        res = client.post(
+            "/api/v1/oauth/google-ads/authorize",
+            headers={"X-Organization-ID": str(org_a.id)},
+            json={"connection_id": conn_a.id},
+        )
+        assert res.status_code == 503
+        assert "GOOGLE_CLIENT_ID" in res.json()["detail"]
+
+        with session_factory() as db:
+            assert db.query(OAuthState).filter_by(connection_id=conn_a.id).all() == []
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_google_ads_per_connection_developer_token_config_and_resolution(
+    google_ads_env, monkeypatch
+):
+    session_factory = google_ads_env["session_factory"]
+    owner = google_ads_env["owner"]
+    org_a = google_ads_env["org_a"]
+    conn_a = google_ads_env["conn_a"]
+
+    def override_db():
+        with session_factory() as s:
+            yield s
+
+    def auth_owner():
+        return AuthenticatedPrincipal(
+            uid=owner.firebase_uid,
+            auth_time=datetime.now(timezone.utc),
+            user=owner,
+        )
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_principal] = auth_owner
+    monkeypatch.setattr(settings, "google_ads_developer_token", "")
+
+    with session_factory() as db:
+        conn = db.get(IntegrationConnection, conn_a.id)
+        conn.config_json = {
+            "access_token_encrypted": encrypt_secret("ya29.ads_access_tok"),
+            "refresh_token_encrypted": encrypt_secret("1//ads_refresh_tok"),
+            "token_expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        }
+        conn.status = "needs_customer_selection"
+        db.commit()
+
+    def fake_discover(access_token: str, developer_token: str):
+        assert access_token == "ya29.ads_access_tok"
+        assert developer_token == "per-conn-dev-tok-999"
+        return [
+            {
+                "customer_id": "1234567890",
+                "descriptive_name": "Client Brand",
+                "currency_code": "USD",
+                "time_zone": "America/New_York",
+                "is_manager": False,
+                "login_customer_id": "1234567890",
+            }
+        ]
+
+    monkeypatch.setattr("app.api.google_ads.refresh_access_token", lambda rt: "ya29.ads_access_tok")
+    monkeypatch.setattr("app.api.google_ads.discover_accessible_customers", fake_discover)
+
+    try:
+        client = TestClient(app)
+
+        # Before developer token is stored anywhere -> /customers returns 400
+        res_missing = client.get(
+            f"/api/v1/connections/{conn_a.id}/google-ads/customers",
+            headers={"X-Organization-ID": str(org_a.id)},
+        )
+        assert res_missing.status_code == 400
+        assert "developer token" in res_missing.json()["detail"].lower()
+
+        # Store per-connection developer token
+        res_cfg = client.post(
+            f"/api/v1/connections/{conn_a.id}/google-ads/config",
+            headers={"X-Organization-ID": str(org_a.id)},
+            json={"developer_token": "per-conn-dev-tok-999"},
+        )
+        assert res_cfg.status_code == 200, res_cfg.text
+        assert res_cfg.json()["has_developer_token"] is True
+        assert "per-conn-dev-tok-999" not in res_cfg.text
+
+        # Verify encrypted at rest and exposed safely via /connections
+        with session_factory() as db:
+            updated = db.get(IntegrationConnection, conn_a.id)
+            assert decrypt_secret(updated.config_json["developer_token_encrypted"]) == "per-conn-dev-tok-999"
+
+        res_list = client.get("/api/v1/connections", headers={"X-Organization-ID": str(org_a.id)})
+        assert res_list.status_code == 200
+        row = next(c for c in res_list.json() if c["id"] == conn_a.id)
+        assert row["has_developer_token"] is True
+        assert "per-conn-dev-tok-999" not in res_list.text
+
+        # Now /customers succeeds using the stored per-connection developer token
+        res_customers = client.get(
+            f"/api/v1/connections/{conn_a.id}/google-ads/customers",
+            headers={"X-Organization-ID": str(org_a.id)},
+        )
+        assert res_customers.status_code == 200, res_customers.text
+        assert res_customers.json()["customers"][0]["customer_id"] == "1234567890"
+    finally:
+        app.dependency_overrides.clear()

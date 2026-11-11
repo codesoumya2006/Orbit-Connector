@@ -1,4 +1,8 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ROOT_ENV_PATH = Path(__file__).resolve().parents[3] / ".env"
 
 class Settings(BaseSettings):
     app_name: str = "Connector Hub API"
@@ -23,6 +27,6 @@ class Settings(BaseSettings):
     groq_default_model: str = "llama-3.3-70b-versatile"
     bigquery_project_id: str = ""
     gcs_bucket: str = ""
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=(str(ROOT_ENV_PATH), ".env"), extra="ignore")
 
 settings = Settings()

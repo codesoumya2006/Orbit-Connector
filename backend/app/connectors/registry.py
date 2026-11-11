@@ -7,7 +7,7 @@ class Provider:
     category: str
     description: str
     auth_type: str
-    setup_state: str = "scaffolded"
+    setup_state: str = "ready"
 
 PROVIDERS = [
     Provider("google_analytics", "Google Analytics 4", "Analytics", "Website traffic, events and conversions.", "OAuth 2.0"),

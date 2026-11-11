@@ -36,6 +36,8 @@ from app.schemas.meta_ads import (
     MetaAdsAccountListResponse,
     MetaAdsAccountSelectRequest,
     MetaAdsCampaignReportRowSchema,
+    MetaAdsConfigRequest,
+    MetaAdsConfigResponse,
     MetaAdsDisconnectResponse,
     MetaAdsOAuthAuthorizeResponse,
     MetaAdsReportResponse,
@@ -43,6 +45,94 @@ from app.schemas.meta_ads import (
 )
 
 router = APIRouter()
+
+
+@router.post(
+    "/connections/{connection_id}/meta-ads/config",
+    response_model=MetaAdsConfigResponse,
+)
+def configure_meta_ads(
+    connection_id: str,
+    payload: MetaAdsConfigRequest,
+    context: OrganizationContext = Depends(require_permission("connector:write")),
+    db: Session = Depends(get_db),
+):
+    """Configure a Meta Ads connection using a validated Marketing API access token."""
+    now = datetime.now(timezone.utc)
+    conn = (
+        db.query(IntegrationConnection)
+        .filter_by(id=connection_id, organization_id=context.organization_id)
+        .first()
+    )
+    if not conn:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Integration connection not found.",
+        )
+    if conn.provider_key != "meta_ads":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Connection is not a Meta Ads integration.",
+        )
+
+    token = payload.access_token.strip()
+    try:
+        if payload.ad_account_id:
+            verified = validate_ad_account_access(
+                access_token=token,
+                account_id=payload.ad_account_id,
+            )
+            accounts_count = 1
+        else:
+            accounts = list_accessible_ad_accounts(access_token=token)
+            verified = None
+            accounts_count = len(accounts)
+    except MetaAdsAccountError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Meta Ads token validation failed: {exc}",
+        ) from exc
+
+    config = dict(conn.config_json or {})
+    config["access_token_encrypted"] = encrypt_secret(token)
+    config["auth_method"] = "access_token"
+    config["authorized_at"] = now.isoformat()
+
+    if verified:
+        config["ad_account_id"] = verified["ad_account_id"]
+        config["ad_account_name"] = verified["name"]
+        config["currency"] = verified.get("currency") or "USD"
+        conn.status = "connected"
+    else:
+        conn.status = "needs_account_selection"
+
+    conn.config_json = config
+    db.add(
+        AuditEvent(
+            id=uuid4(),
+            organization_id=context.organization_id,
+            actor_user_id=context.user_id,
+            event_type="connector.configured",
+            target_type="integration_connection",
+            target_id=str(conn.id),
+            metadata_json={
+                "provider_key": "meta_ads",
+                "action": "configure_access_token",
+                "accounts_count": accounts_count,
+            },
+            created_at=now,
+        )
+    )
+    db.commit()
+
+    return MetaAdsConfigResponse(
+        status=conn.status,
+        connection_id=conn.id,
+        has_secret=True,
+        accounts_count=accounts_count,
+        ad_account_id=config.get("ad_account_id"),
+        message="Meta Ads access token validated and securely stored encrypted.",
+    )
 
 
 @router.post("/oauth/meta-ads/authorize", response_model=MetaAdsOAuthAuthorizeResponse)
@@ -97,8 +187,16 @@ def initiate_meta_ads_oauth(
             db.add(conn)
             db.flush()
 
-    # 2. Generate cryptographically random, single-use state token
+    # 2. Generate cryptographically random, single-use state token and build authorization URL first
     state_token = secrets.token_urlsafe(32)
+    try:
+        auth_url = build_meta_ads_authorization_url(state=state_token)
+    except MetaAdsOAuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
     oauth_state = OAuthState(
         state_token=state_token,
         code_verifier=encrypt_secret("meta_oauth_placeholder_verifier"),
@@ -110,9 +208,6 @@ def initiate_meta_ads_oauth(
     )
     db.add(oauth_state)
     db.commit()
-
-    # 3. Build authorization URL
-    auth_url = build_meta_ads_authorization_url(state=state_token)
 
     return MetaAdsOAuthAuthorizeResponse(
         authorization_url=auth_url,

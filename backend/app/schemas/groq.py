@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 
 
 class GroqConfigRequest(BaseModel):
-    api_key: str = Field(..., min_length=1, description="Groq API key")
+    api_key: str | None = Field(None, description="Groq API key (optional when updating existing connection settings)")
     selected_model: str | None = Field(None, max_length=128)
     temperature: float | None = Field(None, ge=0.0, le=2.0)
     max_tokens: int | None = Field(None, ge=1, le=8192)
